@@ -119,10 +119,54 @@ model_path = output_dir / 'plant_classifier.keras'
 model.save(model_path)
 print(f"✅ Model kaydedildi: {model_path}")
 
+# CoreML'e dönüştür
+print("\n🔄 CoreML'e dönüştürülüyor...")
+try:
+    import coremltools as ct
+    
+    # Label isimlerini yükle
+    labels_path = Path(__file__).parent.parent / 'labels.txt'
+    with open(labels_path, 'r') as f:
+        class_labels = [line.strip() for line in f.readlines() if line.strip()]
+    
+    print(f"   - {len(class_labels)} sınıf label'ı yüklendi")
+    
+    # Model input ismini al
+    input_name = model.input.name.split(':')[0]
+    print(f"   - Model input ismi: {input_name}")
+    
+    # CoreML'e dönüştür
+    coreml_model = ct.convert(
+        model,
+        inputs=[
+            ct.ImageType(
+                name=input_name,
+                shape=(1, 224, 224, 3),
+                scale=1/127.5,  # MobileNetV2 preprocessing
+                bias=[-1, -1, -1],
+                color_layout=ct.colorlayout.RGB
+            )
+        ],
+        classifier_config=ct.ClassifierConfig(class_labels)
+    )
+    
+    # Metadata ekle
+    coreml_model.author = "Plant Classifier"
+    coreml_model.short_description = "Flowers102 dataset ile eğitilmiş çiçek sınıflandırıcı (102 sınıf)"
+    coreml_model.version = "1.0"
+    
+    # Kaydet
+    coreml_path = output_dir / 'PlantClassifier.mlpackage'
+    coreml_model.save(str(coreml_path))
+    print(f"✅ CoreML model kaydedildi: {coreml_path}")
+    
+except Exception as e:
+    print(f"⚠️  CoreML dönüşümü başarısız: {e}")
+    print("   Keras model kaydedildi, CoreML'e manuel dönüştürebilirsiniz.")
+    print("   Manuel dönüştürme: python scripts/convert_to_coreml.py")
+
 print("\n" + "=" * 50)
 print("🎉 EĞİTİM TAMAMLANDI!")
 print("=" * 50)
 print(f"\nFinal Test Accuracy: {test_accuracy * 100:.2f}%")
 print(f"Model: {model_path}")
-print("\n🔄 CoreML'e dönüştürmek için:")
-print("   python scripts/convert_to_coreml.py")
