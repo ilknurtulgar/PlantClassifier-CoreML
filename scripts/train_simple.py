@@ -38,10 +38,23 @@ def preprocess(image, label):
     return image, label
 
 def augment(image, label):
-    image = tf.image.resize(image, [IMG_SIZE + 20, IMG_SIZE + 20])
+    # Güçlü augmentation - %85 için gerekli
+    image = tf.image.resize(image, [IMG_SIZE + 40, IMG_SIZE + 40])
     image = tf.image.random_crop(image, [IMG_SIZE, IMG_SIZE, 3])
     image = tf.image.random_flip_left_right(image)
-    image = tf.image.random_brightness(image, 0.2)
+    # Renk augmentasyonları
+    image = tf.image.random_brightness(image, 0.3)
+    image = tf.image.random_contrast(image, 0.7, 1.3)
+    image = tf.image.random_saturation(image, 0.7, 1.3)
+    image = tf.image.random_hue(image, 0.1)
+    # Random erase (cutout benzeri)
+    if tf.random.uniform([]) > 0.5:
+        h, w = IMG_SIZE // 4, IMG_SIZE // 4
+        y = tf.random.uniform([], 0, IMG_SIZE - h, dtype=tf.int32)
+        x = tf.random.uniform([], 0, IMG_SIZE - w, dtype=tf.int32)
+        mask = tf.ones([h, w, 3])
+        mask = tf.pad(mask, [[y, IMG_SIZE - h - y], [x, IMG_SIZE - w - x], [0, 0]])
+        image = image * (1 - mask) + mask * tf.random.uniform([1, 1, 3], -1, 1)
     image = tf.keras.applications.mobilenet_v2.preprocess_input(image)
     return image, label
 
@@ -67,9 +80,14 @@ base_model.trainable = False
 model = tf.keras.Sequential([
     base_model,
     tf.keras.layers.GlobalAveragePooling2D(),
-    tf.keras.layers.Dropout(0.3),
-    tf.keras.layers.Dense(256, activation='relu'),
-    tf.keras.layers.Dropout(0.3),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(768, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+    tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.4),
     tf.keras.layers.Dense(NUM_CLASSES, activation='softmax')
 ])
 
@@ -85,23 +103,90 @@ print(f"   - Toplam parametre: {model.count_params():,}")
 print("\n🚀 Eğitim başlıyor...")
 print("=" * 50)
 
+# Cosine decay learning rate
+lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=0.001,
+    decay_steps=30 * len(train_ds),
+    alpha=0.0001
+)
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule),
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
 callbacks = [
     tf.keras.callbacks.EarlyStopping(
         monitor='val_accuracy',
-        patience=5,
-        restore_best_weights=True
-    ),
-    tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.2,
-        patience=3
+        patience=10,
+        restore_best_weights=True,
+        mode='max'
     )
 ]
 
+print("📍 Aşama 1: Transfer Learning (üst katmanları eğit - 30 epoch)")
 history = model.fit(
     train_ds,
     validation_data=val_ds,
-    epochs=10,
+    epochs=30,
+    callbacks=callbacks,
+    verbose=1
+)
+
+# Fine-tuning Aşama 1: Base model'in yarısını aç
+print("\n📍 Aşama 2: Fine-tuning (base model'in yarısı - 20 epoch)")
+base_model.trainable = True
+
+# İlk yarı dondur, ikinci yarı eğit
+for layer in base_model.layers[:len(base_model.layers)//2]:
+    layer.trainable = False
+
+print(f"   - Eğitilebilir base katman: {sum([1 for l in base_model.layers if l.trainable])}")
+
+lr_schedule_fine1 = tf.keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=0.0001,
+    decay_steps=20 * len(train_ds),
+    alpha=0.00001
+)
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule_fine1),
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+history_fine1 = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=20,
+    callbacks=callbacks,
+    verbose=1
+)
+
+# Fine-tuning Aşama 2: Tüm base model'i aç
+print("\n📍 Aşama 3: Full Fine-tuning (tüm model - 15 epoch)")
+for layer in base_model.layers:
+    layer.trainable = True
+
+print(f"   - Eğitilebilir toplam katman: {len(model.trainable_variables)}")
+
+lr_schedule_fine2 = tf.keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=0.00003,
+    decay_steps=15 * len(train_ds),
+    alpha=0.000001
+)
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=lr_schedule_fine2),
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+history_fine2 = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=15,
     callbacks=callbacks,
     verbose=1
 )
